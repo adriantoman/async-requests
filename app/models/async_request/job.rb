@@ -1,38 +1,56 @@
 module AsyncRequest
-  class Job < ActiveRecord::Base # rubocop:disable Rails/ApplicationRecord
-    serialize :params, Array
-    enum status: { waiting: 0, processing: 1, processed: 2, failed: 3 }
+  class Job # rubocop:disable Rails/ApplicationRecord
+    include Mongoid::Document
+    extend Enumerize
+
+    store_in collection: "jobs", database: "main"
+
+    field :params, type: Array
+    field :worker, type: String
+    field :uid, type: String
+    field :status_code, type: Integer
+    field :response, type: String
+    field :status
+    enumerize :status, in: { :waiting => 1, :processing => 2, :processed => 3, :failed => 4 }, default: :waiting
+
 
     def self.create_and_enqueue(worker_class, *params)
-      raise ArgumentError if worker_class.nil?
-      create(
-        worker: worker_class,
-        params: params,
-        status: statuses[:waiting],
-        uid: SecureRandom.uuid
-      ).tap { |job| JobProcessor.perform_async(job.id) }
+      raise ArgumentError("Wroker Class cannot be nil") if worker_class.nil?
+
+      job = Job.new
+      job['worker'] = worker_class
+      job['params'] = params
+      job['status'] = Job.status.find_value(:waiting).value
+      job['uid'] = SecureRandom.uuid
+      if job.save
+        JobProcessor.perform_async(job.id)
+      end
+      job
     end
 
     def token
-      @token ||= JsonWebToken.encode(id)
+      @token ||= JsonWebToken.encode(id.to_s)
     end
 
     def successfully_processed!(response, status_code)
       Rails.logger.info("Processing finished successfully for job with id=#{id}")
       update_attributes!(
-        status: :processed,
-        status_code: map_status_code(status_code),
-        response: response.to_s
+          status: Job.status.find_value(:processed).value,
+          status_code: map_status_code(status_code),
+          response: response.to_s
       )
     end
 
     def processing!
+      status = :processing
       Rails.logger.info("Processing job with id=#{id}")
-      super
+      save!
     end
 
+
+
     def finished?
-      processed? || failed?
+      status.processed? || status.failed?
     end
 
     def finished_with_errors!(error)
